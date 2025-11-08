@@ -1,4 +1,4 @@
-#!lua name=token_bucket_redis_1_0_8
+#!lua name=token_bucket_redis_1_0_9
 
 local function get_now_in_milliseconds()
   local result = redis.call("TIME")
@@ -91,7 +91,7 @@ local function use_token_bucket(keys, args)
 end
 
 redis.register_function(
-  "use_token_bucket_1_0_8",
+  "use_token_bucket_1_0_9",
   use_token_bucket
 )
 
