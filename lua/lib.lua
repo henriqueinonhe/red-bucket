@@ -1,4 +1,4 @@
-#!lua name=token_bucket_redis_1_0_0
+#!lua name=token_bucket_redis_1_0_7
 
 local function get_now_in_milliseconds()
   local result = redis.call("TIME")
@@ -80,15 +80,18 @@ local function use_token_bucket(keys, args)
   redis.call("HSET", bucket_key, unpack(updated_bucket))
   redis.call("EXPIRE", bucket_key, math.ceil(seconds_to_refill_completely))
 
+  -- We have to convert all floats to strings
+  -- otherwise Redis coerces them to integers
+  -- and truncates them
   if not there_are_enough_tokens then
-    return {"FAIL", updated_tokens}
+    return {"FAIL", tostring(updated_tokens)}
   end
 
-  return {"SUCCESS", updated_tokens}
+  return {"SUCCESS", tostring(updated_tokens)}
 end
 
 redis.register_function(
-  "use_token_bucket_1_0_0",
+  "use_token_bucket_1_0_7",
   use_token_bucket
 )
 
