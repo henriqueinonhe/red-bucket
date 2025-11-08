@@ -1,6 +1,6 @@
 {
   "name": "red-bucket",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "",
   "main": "dist/index.js",
   "files": [
@@ -10,7 +10,7 @@
   "scripts": {
     "prepublishOnly": "pnpm run test && pnpm build",
     "test": "vitest",
-    "build": "tsc"
+    "build": "rm -rf dist && tsc"
   },
   "keywords": [
     "token bucket",
