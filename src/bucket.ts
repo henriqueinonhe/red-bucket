@@ -43,8 +43,6 @@ export const createBucket = ({
 
     const tokenAmount = parseFloat(tokens);
 
-    console.log({ tokenAmount });
-
     if (outcome === "FAIL") {
       const message = [
         `Not enough tokens!`,
