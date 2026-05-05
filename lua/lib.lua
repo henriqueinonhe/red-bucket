@@ -18,21 +18,26 @@ local function use_token_bucket(keys, args)
   local token_refill_rate_in_tokens_per_minute = tonumber(args[3])
   local now_in_milliseconds = get_now_in_milliseconds()
 
-  local bucket = (function()
-    local stored_bucket = redis.call("HGETALL", bucket_key)
+  -- HMGET with explicit field names so we don't depend on
+  -- HGETALL's iteration order (which is not part of Redis's contract
+  -- and can vary across encodings/versions).
+  local stored = redis.call(
+    "HMGET",
+    bucket_key,
+    "tokens",
+    "last_refilled_at_in_milliseconds"
+  )
 
-    if #stored_bucket ~= 0 then
-      return stored_bucket
-    end
+  local current_tokens
+  local current_last_refilled_at_in_milliseconds
 
-    return {
-      "tokens", token_capacity,
-      "last_refilled_at_in_milliseconds", now_in_milliseconds
-    }
-  end)()
-
-  local current_tokens = bucket[2]
-  local current_last_refilled_at_in_milliseconds = bucket[4]
+  if stored[1] == false then
+    current_tokens = token_capacity
+    current_last_refilled_at_in_milliseconds = now_in_milliseconds
+  else
+    current_tokens = tonumber(stored[1])
+    current_last_refilled_at_in_milliseconds = tonumber(stored[2])
+  end
 
   local time_elapsed_in_milliseconds_since_last_refill = 
     now_in_milliseconds - current_last_refilled_at_in_milliseconds
