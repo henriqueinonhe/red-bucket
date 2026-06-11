@@ -1,25 +1,32 @@
 import { redisClientOrPool } from "./client.js";
 import { libVersion, libFunctionName } from "./lib.js";
 
+export type RefillPolicy = {
+  tokens: number;
+  intervalInMilliseconds: number;
+};
+
 export type Bucket = {
   safeConsume: (amount?: number) => Promise<SafeConsumeOutput>;
-  consume: (amount?: number) => Promise<{ tokenAmount: number }>;
+  consume: (amount?: number) => Promise<{ availableTokens: number }>;
   getId: () => string;
   getCapacity: () => number;
-  getRefillRate: () => number;
-  getTokenAmount: () => Promise<number>;
+  getRefillPolicy: () => RefillPolicy;
+  getAvailableTokens: () => Promise<number>;
+  getTimeUntilFullInMilliseconds: () => Promise<number>;
+  getTimeUntilAvailableInMilliseconds: (tokens?: number) => Promise<number>;
 };
 
 export type CreateBucketInput = {
   id: string;
   capacity: number;
-  refillRateInTokensPerMinute: number;
+  refillPolicy: RefillPolicy;
 };
 
 export const createBucket = ({
   id,
   capacity,
-  refillRateInTokensPerMinute,
+  refillPolicy,
 }: CreateBucketInput): Bucket => {
   if (!redisClientOrPool) {
     throw new Error(
@@ -27,7 +34,51 @@ export const createBucket = ({
     );
   }
 
+  if (!Number.isFinite(capacity) || capacity <= 0) {
+    throw new Error(
+      `\`capacity\` must be a positive number, but received ${capacity}!`,
+    );
+  }
+
+  if (!Number.isFinite(refillPolicy.tokens) || refillPolicy.tokens <= 0) {
+    throw new Error(
+      `\`refillPolicy.tokens\` must be a positive number, but received ${refillPolicy.tokens}!`,
+    );
+  }
+
+  if (
+    !Number.isFinite(refillPolicy.intervalInMilliseconds) ||
+    refillPolicy.intervalInMilliseconds <= 0
+  ) {
+    throw new Error(
+      `\`refillPolicy.intervalInMilliseconds\` must be a positive number, but received ${refillPolicy.intervalInMilliseconds}!`,
+    );
+  }
+
+  const refillTokens = refillPolicy.tokens;
+  const refillIntervalInMilliseconds = refillPolicy.intervalInMilliseconds;
+
+  const refillRateInTokensPerMillisecond =
+    refillTokens / refillIntervalInMilliseconds;
+
   const key = `TOKEN_BUCKET_REDIS_${libVersion}_${id}`;
+
+  // Refilling is continuous and thus deterministic,
+  // so given the current amount of tokens we're able
+  // to compute how long it takes to reach any
+  // given target amount without further roundtrips to Redis
+  const computeTimeUntilAvailableInMilliseconds = (
+    availableTokens: number,
+    targetTokens: number,
+  ) => {
+    if (targetTokens > capacity) {
+      return Infinity;
+    }
+
+    const missingTokens = Math.max(0, targetTokens - availableTokens);
+
+    return missingTokens / refillRateInTokensPerMillisecond;
+  };
 
   const safeConsume = async (amount = 1): Promise<SafeConsumeOutput> => {
     const result = (await redisClientOrPool.fCall(libFunctionName, {
@@ -35,15 +86,18 @@ export const createBucket = ({
       arguments: [
         capacity.toString(),
         amount.toString(),
-        refillRateInTokensPerMinute.toString(),
+        refillRateInTokensPerMillisecond.toString(),
       ],
     })) as RedisFunctionResult;
 
     const [outcome, tokens] = result;
 
-    const tokenAmount = parseFloat(tokens);
+    const availableTokens = parseFloat(tokens);
 
     if (outcome === "FAIL") {
+      const timeUntilAvailableInMilliseconds =
+        computeTimeUntilAvailableInMilliseconds(availableTokens, amount);
+
       const message = [
         `Not enough tokens!`,
         `Tried to consume ${amount} from bucket with id ${id}, but there are only ${tokens} tokens!`,
@@ -53,31 +107,33 @@ export const createBucket = ({
         bucket,
         message,
         reason: "NOT_ENOUGH_TOKENS",
-        tokenAmount,
+        availableTokens,
+        timeUntilAvailableInMilliseconds,
       });
 
       return {
         success: false,
         error,
-        tokenAmount,
+        availableTokens,
+        timeUntilAvailableInMilliseconds,
       };
     }
 
     return {
       success: true,
-      tokenAmount,
+      availableTokens,
     };
   };
 
   const consume = async (amount = 1) => {
-    const { error, tokenAmount } = await safeConsume(amount);
+    const { error, availableTokens } = await safeConsume(amount);
 
     if (error) {
       throw error;
     }
 
     return {
-      tokenAmount,
+      availableTokens,
     };
   };
 
@@ -85,42 +141,64 @@ export const createBucket = ({
 
   const getCapacity = () => capacity;
 
-  const getRefillRate = () => refillRateInTokensPerMinute;
+  const getRefillPolicy = (): RefillPolicy => ({
+    tokens: refillTokens,
+    intervalInMilliseconds: refillIntervalInMilliseconds,
+  });
 
-  const getTokenAmount = async () => {
+  const getAvailableTokens = async () => {
     // When a bucket does not exists in redis
     // it means that either the bucket is being initialized
     // or the key/value expired, which only happens
     // when sufficient time has passed such that
     // the token is full
 
-    const { tokenAmount } = await consume(0);
+    const { availableTokens } = await consume(0);
 
-    return tokenAmount;
+    return availableTokens;
   };
+
+  const getTimeUntilAvailableInMilliseconds = async (tokens = 1) => {
+    if (tokens > capacity) {
+      throw new Error(
+        `Cannot compute the time until ${tokens} tokens are available, because it exceeds the bucket capacity (${capacity}), so it'd never be reached!`,
+      );
+    }
+
+    const availableTokens = await getAvailableTokens();
+
+    return computeTimeUntilAvailableInMilliseconds(availableTokens, tokens);
+  };
+
+  const getTimeUntilFullInMilliseconds = () =>
+    getTimeUntilAvailableInMilliseconds(capacity);
 
   const bucket: Bucket = {
     consume,
     getId,
     getCapacity,
-    getRefillRate,
-    getTokenAmount,
+    getRefillPolicy,
+    getAvailableTokens,
+    getTimeUntilFullInMilliseconds,
+    getTimeUntilAvailableInMilliseconds,
     safeConsume,
   };
 
   return bucket;
 };
 
-type SafeConsumeOutput =
+export type SafeConsumeOutput =
   | {
       success: true;
-      tokenAmount: number;
+      availableTokens: number;
       error?: never;
+      timeUntilAvailableInMilliseconds?: never;
     }
   | {
       success: false;
-      tokenAmount: number;
+      availableTokens: number;
       error: TokenBucketError;
+      timeUntilAvailableInMilliseconds: number;
     };
 
 type RedisFunctionResult = ["SUCCESS" | "FAIL", tokens: string];
@@ -131,7 +209,8 @@ export type TokenBucketErrorConstructorInput = {
   bucket: Bucket;
   message: string;
   reason: TokenBucketErrorReason;
-  tokenAmount: number;
+  availableTokens: number;
+  timeUntilAvailableInMilliseconds: number;
 };
 
 export class TokenBucketError extends Error {
@@ -139,18 +218,21 @@ export class TokenBucketError extends Error {
     message,
     bucket,
     reason,
-    tokenAmount,
+    availableTokens,
+    timeUntilAvailableInMilliseconds,
   }: TokenBucketErrorConstructorInput) {
     super(message);
 
     this.bucket = bucket;
     this.reason = reason;
-    this.tokenAmount = tokenAmount;
+    this.availableTokens = availableTokens;
+    this.timeUntilAvailableInMilliseconds = timeUntilAvailableInMilliseconds;
   }
 
   public reason: TokenBucketErrorReason;
   public bucket: Bucket;
-  public tokenAmount: number;
+  public availableTokens: number;
+  public timeUntilAvailableInMilliseconds: number;
 }
 
 export const isTokenBucketError = (error: unknown): error is TokenBucketError =>

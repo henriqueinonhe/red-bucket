@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { redisClientOrPool } from "./client.js";
 
 export const libPrefix = "token_bucket_redis";
-export const libVersion = "1_0_9";
+export const libVersion = "2_0_0";
 export const libName = `${libPrefix}_${libVersion}`;
 export const libFunctionPrefix = "use_token_bucket";
 export const libFunctionName = `${libFunctionPrefix}_${libVersion}`;

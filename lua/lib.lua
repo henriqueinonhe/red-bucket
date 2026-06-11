@@ -1,4 +1,4 @@
-#!lua name=token_bucket_redis_1_0_9
+#!lua name=token_bucket_redis_2_0_0
 
 local function get_now_in_milliseconds()
   local result = redis.call("TIME")
@@ -15,7 +15,7 @@ local function use_token_bucket(keys, args)
   local bucket_key = keys[1]
   local token_capacity = tonumber(args[1])
   local token_cost = tonumber(args[2])
-  local token_refill_rate_in_tokens_per_minute = tonumber(args[3])
+  local token_refill_rate_in_tokens_per_millisecond = tonumber(args[3])
   local now_in_milliseconds = get_now_in_milliseconds()
 
   -- HMGET with explicit field names so we don't depend on
@@ -39,17 +39,14 @@ local function use_token_bucket(keys, args)
     current_last_refilled_at_in_milliseconds = tonumber(stored[2])
   end
 
-  local time_elapsed_in_milliseconds_since_last_refill = 
+  local time_elapsed_in_milliseconds_since_last_refill =
     now_in_milliseconds - current_last_refilled_at_in_milliseconds
 
-  local token_refill_rate_in_tokens_per_millisecond = 
-    token_refill_rate_in_tokens_per_minute / (60 * 1000)
-
-  local tokens_to_refill = 
+  local tokens_to_refill =
     token_refill_rate_in_tokens_per_millisecond * time_elapsed_in_milliseconds_since_last_refill
 
   local tokens_after_refill = math.min(
-    current_tokens + tokens_to_refill, 
+    current_tokens + tokens_to_refill,
     token_capacity
   )
 
@@ -76,10 +73,10 @@ local function use_token_bucket(keys, args)
 
   local tokens_to_refill_completely = token_capacity - updated_tokens
 
-  local milliseconds_to_refill_completely = 
+  local milliseconds_to_refill_completely =
     tokens_to_refill_completely / token_refill_rate_in_tokens_per_millisecond
 
-  local seconds_to_refill_completely = 
+  local seconds_to_refill_completely =
     milliseconds_to_refill_completely / 1000
 
   redis.call("HSET", bucket_key, unpack(updated_bucket))
@@ -96,9 +93,6 @@ local function use_token_bucket(keys, args)
 end
 
 redis.register_function(
-  "use_token_bucket_1_0_9",
+  "use_token_bucket_2_0_0",
   use_token_bucket
 )
-
-
-

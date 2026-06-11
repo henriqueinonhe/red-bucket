@@ -21,7 +21,11 @@ app.get("/users", async (request, reply) => {
     // Some unique ID
     id: `USERS_ENDPOINT_${request.ip}`,
     capacity: 200,
-    refillRateInTokensPerMinute: 60,
+    // Refills 60 tokens every minute
+    refillPolicy: {
+      tokens: 60,
+      intervalInMilliseconds: 60_000,
+    },
   });
 
   const { success } = await bucket.safeConsume(1);
@@ -75,7 +79,11 @@ Note: For optimization reasons, calling this function **does not** cause the buc
 
 - `id: string` -> An id that **uniquely** identifies your bucket. You may compose this id by concatenating the operation name with the user's identifier (ip for anonymous users and the user's id for authenticated ones).
 - `capacity: number` -> The maximum amount of tokens the bucket can hold.
-- `refillRateInTokensPerMinute` -> How many tokens the bucket will be refilled with in the span of one minute.
+- `refillPolicy: { tokens: number; intervalInMilliseconds: number }` -> How many `tokens` get replenished every `intervalInMilliseconds`.
+
+Refilling is **continuous**: tokens are replenished smoothly (including fractional amounts) rather than landing in chunks at each interval, so `{ tokens: 5, intervalInMilliseconds: 10_000 }` is equivalent to `{ tokens: 1, intervalInMilliseconds: 2_000 }` — the two fields are just a readable way of expressing a rate.
+
+Throws if `capacity`, `refillPolicy.tokens` or `refillPolicy.intervalInMilliseconds` are not positive numbers.
 
 #### Returns
 
@@ -89,9 +97,9 @@ Returns the bucket id.
 
 Returns the bucket capacity.
 
-### `bucket.getRefillRate()`
+### `bucket.getRefillPolicy()`
 
-Returns the bucket refill rate.
+Returns the bucket refill policy (`{ tokens, intervalInMilliseconds }`).
 
 ### `bucket.consume()`
 
@@ -109,7 +117,10 @@ app.get("/users", async (request, reply) => {
   const bucket = createBucket({
     id: `USERS_ENDPOINT_${request.ip}`,
     capacity: 200,
-    refillRateInTokensPerMinute: 60,
+    refillPolicy: {
+      tokens: 60,
+      intervalInMilliseconds: 60_000,
+    },
   });
 
   try {
@@ -132,7 +143,7 @@ app.get("/users", async (request, reply) => {
 
 #### Returns
 
-An object `{ tokenAmount: number }` where `tokenAmount` is the number of **remaining tokens** in the bucket.
+An object `{ availableTokens: number }` where `availableTokens` is the number of **remaining tokens** in the bucket.
 
 ### `bucket.safeConsume()`
 
@@ -146,7 +157,10 @@ app.get("/users", async (request, reply) => {
   const bucket = createBucket({
     id: `USERS_ENDPOINT_${request.ip}`,
     capacity: 200,
-    refillRateInTokensPerMinute: 60,
+    refillPolicy: {
+      tokens: 60,
+      intervalInMilliseconds: 60_000,
+    },
   });
 
   const { success } = await bucket.safeConsume(1);
@@ -168,16 +182,92 @@ app.get("/users", async (request, reply) => {
 #### Returns
 
 - `result`
-  - `success: boolean` -> Whether the token had enough tokens to be consumed.
-  - `tokenAmount: number` -> The number of tokens remaining.
+  - `success: boolean` -> Whether the bucket had enough tokens to be consumed.
+  - `availableTokens: number` -> The number of tokens remaining.
   - `error?: TokenBucketError` -> The corresponding `TokenBucketError` when there are not enough tokens.
+  - `timeUntilAvailableInMilliseconds?: number` -> Only present when the consumption **fails**: how long until the bucket holds the attempted amount, which is exactly what you want for a `Retry-After` header. It is `Infinity` when the attempted amount exceeds the bucket capacity (it'd never be reached). Also available on the `error` itself.
 
 The `result` object is a **discriminated** union, which means that when you check for the presence/absence of `error` or the `success` to be true/false, TypeScript is able to **narrow down** the type.
 
-### `bucket.getTokenAmount()`
+### `bucket.getAvailableTokens()`
 
-Returns the amount of tokens in the bucket.
+Returns the amount of tokens currently in the bucket.
 
 #### Returns
 
 A `Promise<number>`.
+
+### `bucket.getTimeUntilFullInMilliseconds()`
+
+Returns how long until the bucket gets completely refilled, e.g. for populating a `RateLimit-Reset` header.
+
+Returns `0` when the bucket is already full.
+
+#### Returns
+
+A `Promise<number>`.
+
+### `bucket.getTimeUntilAvailableInMilliseconds()`
+
+Returns how long until the bucket holds at least a given amount of tokens.
+
+Returns `0` when the bucket already holds the given amount.
+
+Throws when the given amount exceeds the bucket capacity, as it'd never be reached.
+
+#### Parameters
+
+- `tokens?: number` -> The target amount of tokens. Defaults to 1 token.
+
+#### Returns
+
+A `Promise<number>`.
+
+## Populating rate limiting headers
+
+All the values needed for the standard rate limiting headers are exposed by the bucket:
+
+```ts
+app.get("/users", async (request, reply) => {
+  const bucket = createBucket({
+    id: `USERS_ENDPOINT_${request.ip}`,
+    capacity: 200,
+    refillPolicy: {
+      tokens: 60,
+      intervalInMilliseconds: 60_000,
+    },
+  });
+
+  const result = await bucket.safeConsume(1);
+
+  reply.header("RateLimit-Limit", bucket.getCapacity());
+  reply.header("RateLimit-Remaining", Math.floor(result.availableTokens));
+  reply.header(
+    "RateLimit-Reset",
+    Math.ceil((await bucket.getTimeUntilFullInMilliseconds()) / 1000),
+  );
+
+  if (!result.success) {
+    reply.header(
+      "Retry-After",
+      Math.ceil(result.timeUntilAvailableInMilliseconds / 1000),
+    );
+
+    return reply.status(429).send("Too many requests!");
+  }
+
+  const users = await getUsers();
+
+  return reply.status(200).send(users);
+});
+```
+
+Note that `Retry-After` comes for free from the failed `safeConsume` result — it doesn't cost an extra roundtrip to Redis.
+
+## Migrating from v1
+
+- `refillRateInTokensPerMinute: 60` became `refillPolicy: { tokens: 60, intervalInMilliseconds: 60_000 }`. The refilling behavior itself is unchanged (continuous).
+- `bucket.getRefillRate()` became `bucket.getRefillPolicy()` and returns the `refillPolicy` object.
+- `bucket.getTokenAmount()` was renamed to `bucket.getAvailableTokens()`.
+- The `tokenAmount` field on `consume()`/`safeConsume()` results and on `TokenBucketError` was renamed to `availableTokens`.
+- Buckets created by v1 and v2 live under different Redis keys, so both versions can run side by side during a rollout — v1 buckets simply expire on their own.
